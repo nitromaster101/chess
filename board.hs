@@ -12,6 +12,7 @@ type Piece = (Color, Kind)
 type Position = (Int8, Int8)
 -- enpassant is the pawn that will do the enpassanting
 data Move = RegularMove Position Position | Promotion Position Kind |
+            TakingPromotion Position Position Kind |
             CastleKingside | CastleQueenside | EnPassant Position
           deriving (Eq)
 
@@ -53,6 +54,15 @@ square_color (r, c) = if even (r + c) then Black else White
 get_piece :: Board -> Position -> Maybe Piece
 get_piece b = ((board b) !)
 
+get_pieces_by_kind :: Board -> Piece -> [Position]
+get_pieces_by_kind b (color, kind) =
+  foldr (\pos acc ->
+          let x = arr ! pos in
+          case x of Nothing -> acc
+                    Just (c, k) -> pos:acc) []
+  (range . bounds $ arr)
+  where arr = board b
+
 blocked :: Board -> Position -> Bool
 blocked b (r, c) = isJust $ get_piece b (r, c)
 
@@ -66,7 +76,7 @@ piece_range :: Board -> Color -> [Position] -> [Position]
 piece_range _ _ [] = []
 piece_range b c (p:ps) = case get_piece b p of
                            Nothing -> p : piece_range b c ps
-                           Just (col, k) -> if col /= c then [p] else []
+                           Just (col, _) -> if col /= c then [p] else []
 
 get_pieces :: Board -> Color -> [(Position, Piece)]
 get_pieces b color = foldr (\pos acc ->
@@ -77,13 +87,31 @@ get_pieces b color = foldr (\pos acc ->
                      (range . bounds $ arr)
   where arr = board b
 
+_change_board_color :: Board -> Color -> Board
+_change_board_color b color = Board {
+  board = board b,
+  toMove = color,
+  whiteCanCastleK = whiteCanCastleK b,
+  whiteCanCastleQ = whiteCanCastleQ b,
+  blackCanCastleK = blackCanCastleK b,
+  blackCanCastleQ = blackCanCastleQ b,
+  enPassantEnabled = enPassantEnabled b }
+
+
 -- lets separate the pieces into attack squares
 -- and non attack squares... maybe
 
 -- here, the question is: is color attacking the position?
-isattacked :: Board -> Color -> Position -> Bool
-isattacked b p c = undefined
-
+-- we'll do this by looking at all the pieces at considering
+-- if there are any moves that reach this positions. only have to consider regularmoves
+is_attacked :: Board -> Color -> Position -> Bool
+is_attacked b c p = any dest $ all_moves (_change_board_color b c)
+  where dest (RegularMove old new) = new == p
+        dest (Promotion _ _) = False
+        dest (TakingPromotion old new k) = new == p
+        dest CastleKingside = False
+        dest CastleQueenside = False
+        dest (EnPassant _) = False
 
 attacked_positions :: Board -> Position -> [Position]
 attacked_positions b (r, c) = mapMaybe (\m -> case m of RegularMove _ p -> Just p
@@ -113,6 +141,16 @@ valid_moves b (r, c) = moves . concat . map (piece_range b turn) .
 
 all_moves :: Board -> [Move]
 all_moves b = concat $ map (\p -> gen_moves b p) (range $ bounds (board b))
+
+-- is color in check right now?
+in_check :: Board -> Color -> Bool
+in_check b color = is_attacked b (other color) $
+                   head $ get_pieces_by_kind b (color, King)
+
+-- only the legal ones
+all_legal_moves :: Board -> [Move]
+all_legal_moves b = filter (\m -> not $ in_check (make_move b m) turn) (all_moves b)
+  where turn = toMove b
 
 -- this only generates the list of possible moevs
 -- we don't check for checks or the fact we're in check
@@ -145,7 +183,7 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                        case get_piece b (r + colorval, c+1) of
                          Nothing -> []
                          Just (col, _) -> if col /= turn then
-                                          [RegularMove (r, c) (r+colorval, c+1)]
+                                            pawn_taking (c+1)
                                           else []
                        else []
                      ) ++
@@ -154,7 +192,7 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                          case get_piece b (r + colorval, c-1) of
                          Nothing -> []
                          Just (col, _) -> if col /= turn then
-                                          [RegularMove (r, c) (r+colorval, c-1)]
+                                            pawn_taking (c-1)
                                           else []
                        else []
                      )
@@ -194,6 +232,12 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
   where piece = get_piece b (r, c)
         turn = toMove b
         colorval = if turn == White then -1 else 1
+        pawn_taking column = if (r /= 6 && turn == Black) ||
+                                (r /= 1 && turn == White) then
+                               [RegularMove (r, c) (r+colorval, column)]
+                               else map (TakingPromotion (r, c) (r+colorval, column))
+                                    all_kinds
+
         kside co = map str2pos $ case co of White -> ["f1", "g1"]; Black -> ["f8", "g8"]
         qside co = map str2pos $ case co of White -> ["b1", "c1", "d1"]
                                             Black -> ["b8", "c8", "d8"]
@@ -207,8 +251,8 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                                                   $ qside co
                                          Black -> map (get_piece bo)
                                                   $ qside co
-        nokside_checks bo co = all (not . isattacked bo co) (kside co)
-        noqside_checks bo co = all (not . isattacked bo co) (qside co)
+        nokside_checks bo co = all (not . is_attacked bo co) (kside co)
+        noqside_checks bo co = all (not . is_attacked bo co) (qside co)
 
 
 other :: Color -> Color
@@ -223,12 +267,13 @@ make_move b m =
           whiteCanCastleQ = whiteCanCastleQ b,
           blackCanCastleK = blackCanCastleK b,
           blackCanCastleQ = blackCanCastleQ b,
-          enPassantEnabled = case m of RegularMove (old@(r, c)) (new@(nr, nc)) ->
+          enPassantEnabled = case m of RegularMove (old@(r, _)) (new@(nr, _)) ->
                                          if r == (pawn_row turn) then
                                            case get_piece b old of
                                              Just (_, Pawn) -> if abs (nr - r) == 2
                                                                   then Just new
                                                                        else Nothing
+                                             _ -> Nothing
                                          else Nothing
                                        _ -> Nothing
 
@@ -244,6 +289,8 @@ make_move b m =
         newboard (Promotion (dest@(r, c)) kind) = rawboard // [(oldpos, Nothing),
                                                     (dest, Just (turn, kind))]
           where oldpos = case turn of White -> (r+1, c); Black -> (r-1, c)
+        newboard (TakingPromotion old new kind) = rawboard // [(old, Nothing),
+                                                               (new, Just (turn, kind))]
         newboard CastleKingside = case turn of
           White -> rawboard // [(str2pos "e1", Nothing), (str2pos "h1", Nothing),
                                 (str2pos "g1", Just (White, King)),
@@ -352,6 +399,8 @@ instance Show Move where
 
   show (RegularMove ps pd) = pos2str ps ++ pos2str pd
   show (Promotion ps k) = pos2str ps ++ "=" ++ (take 1 $ show k)
+  show (TakingPromotion old new k) = pos2str old ++ "x" ++ pos2str new ++ "=" ++
+                                     (take 1 $ show k)
   show (CastleKingside) = "O-O"
   show (CastleQueenside) = "O-O-O"
   show (EnPassant ps) = pos2str ps ++ " ep."
