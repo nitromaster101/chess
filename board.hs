@@ -1,9 +1,10 @@
 module Board where
 
-import Data.Array
+import Data.Array (array, listArray, (//), (!), range, bounds, Ix, Array, elems)
 import Data.Int (Int8)
 import Data.List (intersperse)
-import Data.Char (ord, chr)
+import Data.List.Split (wordsBy)
+import Data.Char (ord, chr, isDigit, digitToInt, isLower, toLower)
 import Data.Maybe (isJust, isNothing, mapMaybe, fromJust)
 
 data Color = White | Black deriving (Eq, Show, Enum)
@@ -23,7 +24,38 @@ data Board = Board { board :: Array Position (Maybe Piece),
                      blackCanCastleQ :: Bool,
                      enPassantEnabled :: Maybe Position, -- the pawn that could be
                                                          -- captured via en passant
-                     toMove :: Color}
+                     toMove :: Color} deriving (Eq)
+-- board_from_fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -" == initial_board
+board_from_fen :: String -> Board
+board_from_fen s = go $ words s
+  where go [pieces, tomove, castling, enpassant] =
+          Board { board = pieces2array pieces,
+                  whiteCanCastleK = 'K' `elem` castling,
+                  whiteCanCastleQ = 'Q' `elem` castling,
+                  blackCanCastleK = 'k' `elem` castling,
+                  blackCanCastleQ = 'q' `elem` castling,
+                  enPassantEnabled = convert_enpassant enpassant,
+                  toMove = if 'w' `elem` tomove then White else Black }
+        go _ = error "fen must have four space limited regions"
+        letter2piece c = (if isLower c then Black else White, letter2kind (toLower c))
+        letter2kind 'p' = Pawn
+        letter2kind 'r' = Rook
+        letter2kind 'n' = Knight
+        letter2kind 'b' = Bishop
+        letter2kind 'q' = Queen
+        letter2kind 'k' = King
+        letter2kind c = error $ "unrecognized idenfier: '" ++ [c] ++ "' in board_from_fen."
+        pieces2array str = listArray ((0,0),(7,7)) $
+                         concatMap (concatMap (\c -> if isDigit c
+                                          then replicate (digitToInt c) Nothing
+                                          else [Just $ letter2piece c])) $
+                         wordsBy (=='/') str
+        convert_enpassant "-" = Nothing
+        convert_enpassant str = Just $ if r == 2 then (r+1, c) else (r-1, c)
+          where (r, c) = str2pos str
+
+
+
 
 pretty_piece :: Piece -> String
 pretty_piece (c, k) = case c of Black ->
@@ -59,7 +91,7 @@ get_pieces_by_kind b (color, kind) =
   foldr (\pos acc ->
           let x = arr ! pos in
           case x of Nothing -> acc
-                    Just (c, k) -> pos:acc) []
+                    Just (c, k) -> if c == color && k == kind then pos:acc else acc) []
   (range . bounds $ arr)
   where arr = board b
 
@@ -106,9 +138,9 @@ _change_board_color b color = Board {
 -- if there are any moves that reach this positions. only have to consider regularmoves
 is_attacked :: Board -> Color -> Position -> Bool
 is_attacked b c p = any dest $ all_moves (_change_board_color b c)
-  where dest (RegularMove old new) = new == p
+  where dest (RegularMove _ new) = new == p
         dest (Promotion _ _) = False
-        dest (TakingPromotion old new k) = new == p
+        dest (TakingPromotion _ new _) = new == p
         dest CastleKingside = False
         dest CastleQueenside = False
         dest (EnPassant _) = False
