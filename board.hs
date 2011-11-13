@@ -2,9 +2,9 @@ module Board where
 
 import Data.Array (array, listArray, (//), (!), range, bounds, Ix, Array, elems)
 import Data.Int (Int8)
-import Data.List (intersperse)
+import Data.List (intersperse, intercalate)
 import Data.List.Split (wordsBy)
-import Data.Char (ord, chr, isDigit, digitToInt, isLower, toLower)
+import Data.Char (ord, chr, isDigit, digitToInt, isLower, toLower, toUpper)
 import Data.Maybe (isJust, isNothing, mapMaybe, fromJust)
 
 data Color = White | Black deriving (Eq, Show, Enum)
@@ -25,6 +25,50 @@ data Board = Board { board :: Array Position (Maybe Piece),
                      enPassantEnabled :: Maybe Position, -- the pawn that could be
                                                          -- captured via en passant
                      toMove :: Color} deriving (Eq)
+
+-- should be the inverse of board_from_fen
+board_to_fen :: Board -> String
+board_to_fen (Board { board = board,
+                      whiteCanCastleK = wcck,
+                      whiteCanCastleQ = wccq,
+                      blackCanCastleK = bcck,
+                      blackCanCastleQ = bccq,
+                      enPassantEnabled = epe,
+                      toMove = tm }) =
+  (intercalate "/" $ map print_row [0..7]) ++ " " ++
+  (if tm == White then "w" else "b") ++ " " ++
+  (if wcck then "K" else "") ++ (if wccq then "Q" else "") ++
+  (if bcck then "k" else "") ++ (if bccq then "q" else "") ++ " " ++
+  (enpassant epe)
+  where print_row r = go $ foldl (\(upto, blanks) x -> case x of Nothing -> (upto, blanks+1)
+                                                                 Just p -> if blanks == 0 then (upto ++ piece2str p, 0)
+                                                                      else (upto ++ (show blanks) ++ piece2str p, 0))
+                      ("", 0) pieces
+          where go (s, 0) = s
+                go (s, n) = s ++ (show n)
+                indices = range ((r, 0), (r, 7))
+                pieces = map (board !) indices
+                piece2str (White, p) = map toUpper $ piece2str (Black, p)
+                piece2str (Black, p) = case p of King -> "k"; Queen -> "q"; Bishop -> "b";
+                                                 Knight -> "n"; Rook -> "r"; Pawn -> "p"
+
+        enpassant Nothing = "-"
+        -- we have to do the opposite of normal because if its white's move, then
+        -- black's pawn is enpassantable
+        enpassant (Just (r, c)) = pos2str $ if tm == White then (r-1, c) else (r+1, c)
+
+kind2letter Knight = 'N'
+kind2letter x = head $ show x
+
+letter2kind 'p' = Pawn
+letter2kind 'r' = Rook
+letter2kind 'n' = Knight
+letter2kind 'b' = Bishop
+letter2kind 'q' = Queen
+letter2kind 'k' = King
+letter2kind c = error $ "unrecognized idenfier: '" ++ [c] ++ "' in letter2kind."
+
+
 -- board_from_fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -" == initial_board
 board_from_fen :: String -> Board
 board_from_fen s = go $ words s
@@ -38,13 +82,6 @@ board_from_fen s = go $ words s
                   toMove = if 'w' `elem` tomove then White else Black }
         go _ = error "fen must have four space limited regions"
         letter2piece c = (if isLower c then Black else White, letter2kind (toLower c))
-        letter2kind 'p' = Pawn
-        letter2kind 'r' = Rook
-        letter2kind 'n' = Knight
-        letter2kind 'b' = Bishop
-        letter2kind 'q' = Queen
-        letter2kind 'k' = King
-        letter2kind c = error $ "unrecognized idenfier: '" ++ [c] ++ "' in board_from_fen."
         pieces2array str = listArray ((0,0),(7,7)) $
                          concatMap (concatMap (\c -> if isDigit c
                                           then replicate (digitToInt c) Nothing
@@ -82,6 +119,14 @@ pos2str (r, c) = [chr $ ord 'a' + fromIntegral c, chr $ (7 + ord '1' - fromInteg
 
 square_color :: Position -> Color
 square_color (r, c) = if even (r + c) then Black else White
+
+-- number of pieces on the board
+number_of_pieces :: Board -> Int
+number_of_pieces b = foldr (\pos acc ->
+                             let x = arr ! pos in
+                             case x of Nothing -> acc
+                                       Just (c, k) -> acc+1) 0 (range . bounds $ arr)
+  where arr = board b
 
 get_piece :: Board -> Position -> Maybe Piece
 get_piece b = ((board b) !)
@@ -161,9 +206,8 @@ rook_moves = [(diff, 0) | diff <- [1..7]] :
              [(0, diff) | diff <- [-1,-2..(-7)]] : [[]]
 queen_moves = bishop_moves ++ rook_moves
 knight_moves = map return $
-               [(da, db) |
-                (da, db) <- [(2, 1), (1, 2), (-1, 2), (1, -2),
-                             (2, -1), (-2, 1), (-1, -2), (-2, -1)]]
+               [(2, 1), (1, 2), (-1, 2), (1, -2),
+                (2, -1), (-2, 1), (-1, -2), (-2, -1)]
 
 valid_moves :: Board -> Position -> [[Position]] -> [Move]
 valid_moves b (r, c) = moves . concat . map (piece_range b turn) .
@@ -174,17 +218,32 @@ valid_moves b (r, c) = moves . concat . map (piece_range b turn) .
 all_moves :: Board -> [Move]
 all_moves b = concat $ map (\p -> gen_moves b p) (range $ bounds (board b))
 
+is_done :: Board -> Bool
+is_done b = in_stalemate b || in_checkmate b
+
+in_stalemate :: Board -> Bool
+in_stalemate b = ((not $ in_check b turn) && ((length $ all_legal_moves b) == 0)) || (number_of_pieces b == 2)
+
+  where turn = toMove b
+
+-- is the person tomove in checkmate?
+in_checkmate :: Board -> Bool
+in_checkmate b = (in_check b turn) && ((length $ all_legal_moves b) == 0)
+  where turn = toMove b
+
 -- is color in check right now?
 in_check :: Board -> Color -> Bool
-in_check b color = is_attacked b (other color) $
-                   head $ get_pieces_by_kind b (color, King)
+in_check b color = case kings of [] -> True
+                                 (k:_) -> is_attacked b (other color) $
+                                          head $ kings
+  where kings = get_pieces_by_kind b (color, King)
 
 -- only the legal ones
 all_legal_moves :: Board -> [Move]
 all_legal_moves b = filter (\m -> not $ in_check (make_move b m) turn) (all_moves b)
   where turn = toMove b
 
--- this only generates the list of possible moevs
+-- this only generates the list of possible moves
 -- we don't check for checks or the fact we're in check
 -- but we do make sure every move is legal otherwise
 -- (ie, we don't try to take our own pieces, but we may
@@ -200,15 +259,22 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                                               rr == r then
                                              [EnPassant (r, c)] else []
                       ) ++
+                     -- two spots
                      (if r == 6 then
                         if turn == White then
-                          map (RegularMove (r, c)) $ clear b [(r-1, c), (r-2, c)]
-                        else map (Promotion (r+1, c)) all_kinds
+                          map (RegularMove (r, c)) $ clear b [(r-1,c), (r-2, c)]
+                        else map (Promotion (r+1, c)) promotion_kinds
                       else if r == 1 then
                              if turn == Black then
                                map (RegularMove (r, c)) $ clear b [(r+1, c), (r+2, c)]
-                             else map (Promotion (r-1, c)) all_kinds
-                           else []) ++
+                             else map (Promotion (r-1, c)) promotion_kinds
+                           else
+                             -- one spot
+                               if turn == White then
+                                 map (RegularMove (r, c)) $ clear b [(r-1, c)]
+                               else
+                                 map (RegularMove (r, c)) $ clear b [(r+1, c)]
+                     ) ++
                      -- what about pawn captures
                      (
                        if inside (r + colorval, c+1) then
@@ -268,7 +334,7 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                                 (r /= 1 && turn == White) then
                                [RegularMove (r, c) (r+colorval, column)]
                                else map (TakingPromotion (r, c) (r+colorval, column))
-                                    all_kinds
+                                    promotion_kinds
 
         kside co = map str2pos $ case co of White -> ["f1", "g1"]; Black -> ["f8", "g8"]
         qside co = map str2pos $ case co of White -> ["b1", "c1", "d1"]
@@ -283,6 +349,7 @@ gen_moves b (r, c) = case piece of { Nothing -> [];
                                                   $ qside co
                                          Black -> map (get_piece bo)
                                                   $ qside co
+        -- ugh.. i don't think this is right
         nokside_checks bo co = all (not . is_attacked bo co) (kside co)
         noqside_checks bo co = all (not . is_attacked bo co) (qside co)
 
@@ -291,14 +358,54 @@ other :: Color -> Color
 other White = Black
 other Black = White
 
-make_move :: Board -> Move -> Board
-make_move b m =
-  Board { board = newboard m,
-          toMove= other turn,
+swap_color :: Board -> Board
+swap_color b =
+  Board { board = board b,
+          toMove = other $ toMove b,
           whiteCanCastleK = whiteCanCastleK b,
           whiteCanCastleQ = whiteCanCastleQ b,
           blackCanCastleK = blackCanCastleK b,
           blackCanCastleQ = blackCanCastleQ b,
+          enPassantEnabled = enPassantEnabled b }
+
+set_castling :: Board -> Bool -> Bool -> Bool -> Bool -> Board
+set_castling b wk wq bk bq =
+  Board { board = board b,
+          toMove = toMove b,
+          whiteCanCastleK = wk,
+          whiteCanCastleQ = wq,
+          blackCanCastleK = bk,
+          blackCanCastleQ = bq,
+          enPassantEnabled = enPassantEnabled b }
+
+
+put_piece :: Board -> Position -> Piece -> Board
+put_piece b pos p = alter_board b (\a -> a // [(pos, Just p)])
+
+alter_board :: Board -> (Array Position (Maybe Piece) -> Array Position (Maybe Piece))
+             -> Board
+alter_board b newboard =
+  Board { board = newboard (board b),
+          toMove = toMove b,
+          whiteCanCastleK = whiteCanCastleK b,
+          whiteCanCastleQ = whiteCanCastleQ b,
+          blackCanCastleK = blackCanCastleK b,
+          blackCanCastleQ = blackCanCastleQ b,
+          enPassantEnabled = enPassantEnabled b }
+
+
+
+move :: Board -> String -> Board
+move b m = make_move b (str2move m)
+
+make_move :: Board -> Move -> Board
+make_move b m =
+  Board { board = newboard m,
+          toMove= other turn,
+          whiteCanCastleK = ck White,
+          whiteCanCastleQ = cq White,
+          blackCanCastleK = ck Black,
+          blackCanCastleQ = cq Black,
           enPassantEnabled = case m of RegularMove (old@(r, _)) (new@(nr, _)) ->
                                          if r == (pawn_row turn) then
                                            case get_piece b old of
@@ -312,6 +419,12 @@ make_move b m =
 
         }
   where turn = toMove b
+        ck c = if c == turn then case m of CastleKingside -> False; _ -> old else old
+          where old = if c == White then whiteCanCastleK b else blackCanCastleK b
+        cq c = if c == turn then case m of CastleQueenside -> False; _ -> old else old
+          where old = if c == White then whiteCanCastleQ b else blackCanCastleQ b
+
+
         pawn_row White = 6
         pawn_row Black = 1
         rawboard = board b
@@ -363,6 +476,9 @@ _board_finishings = (("  "++) $
                      intersperse "|" $
                      take 8 [[' ',v] | v <- ['a'..]])
 
+pbs :: [Board] -> IO ()
+pbs = putStrLn . print_boards
+
 print_boards :: [Board] -> String
 print_boards [] = unlines $ zipWith3 (\a b c -> a++"   "++b++"   "++ c)
                   (lines _board_finishings)
@@ -398,7 +514,8 @@ _board_to_lines bb = zipWith (\i s -> show i ++ "|" ++ s)
 
 
 instance Show Board where
-  show bb = (unlines $
+  show bb = "\n" ++
+            (unlines $
              zipWith (\i s -> show i ++ "|" ++ s)
              [8::Integer, 7..] $
              map
@@ -430,13 +547,20 @@ instance Show Board where
 instance Show Move where
 
   show (RegularMove ps pd) = pos2str ps ++ pos2str pd
-  show (Promotion ps k) = pos2str ps ++ "=" ++ (take 1 $ show k)
+  show (Promotion ps k) = pos2str ps ++ "=" ++ [kind2letter k]
   show (TakingPromotion old new k) = pos2str old ++ "x" ++ pos2str new ++ "=" ++
-                                     (take 1 $ show k)
+                                     [kind2letter k]
   show (CastleKingside) = "O-O"
   show (CastleQueenside) = "O-O-O"
   show (EnPassant ps) = pos2str ps ++ " ep."
 
+
+str2move "O-O" = CastleKingside
+str2move "O-O-O" = CastleQueenside
+str2move (a:b:'=':c:[]) = Promotion (str2pos $ a:b:[]) (letter2kind $ toLower c)
+str2move (a:b:c:d:[]) = RegularMove (str2pos $ a:b:[]) (str2pos $ c:d:[])
+str2move (a:b:'x':c:d:'=':e:[]) = TakingPromotion (str2pos $ a:b:[]) (str2pos $ c:d:[]) (letter2kind $ toLower e)
+str2move (a:b:" ep.") = EnPassant (str2pos $ a:b:[])
 
 mkArray :: (Ix a) => (a -> b) -> (a, a) -> Array a b
 mkArray f bnds = array bnds [(i, f i) | i <- range bnds]
@@ -445,10 +569,39 @@ sample_board :: Board
 sample_board = Board { board = mkArray (\(r, c) -> if r == 2 && c == 3 then Just (White, King) else if r == 3 && c == 3 then Just (White, Pawn) else if r == 5 && c == 1 then Just (Black, King) else Nothing) ((0,0), (7,7)), whiteCanCastleK=True, whiteCanCastleQ=True, blackCanCastleK=True, blackCanCastleQ=True, enPassantEnabled=Nothing, toMove=White }
 
 all_kinds :: [Kind]
-all_kinds = [(Pawn)..(King)]
+all_kinds = [(King)..(Pawn)]
+
+promotion_kinds :: [Kind]
+promotion_kinds = [Knight, Bishop, Rook, Queen]
 
 first_rank :: [Kind]
 first_rank = [Rook, Knight, Bishop, Queen, King, Bishop, Knight, Rook]
+
+empty_board :: Board
+empty_board = Board { board = mkArray (\_ -> Nothing) ((0,0), (7,7)),
+                      toMove=White,
+                      whiteCanCastleK=True,
+                      whiteCanCastleQ=True,
+                      blackCanCastleK=True,
+                      blackCanCastleQ=True,
+                      enPassantEnabled=Nothing }
+
+pb :: Board
+pb = Board { board = mkArray (\(r, c) -> if r == 6 then if c >= 5 then Just (White, Pawn)
+                                                                   else Nothing
+                                                    else if r == 5 && (c == 2 || c == 0) then
+                                                           Just (Black, Pawn)
+                                                         else if r == 1 && c == 6 then Just (Black, King)
+                                                              else
+                                                                if r == 7 && c == 1 then Just (White, King) else Nothing)
+                                ((0, 0), (7, 7)),
+                        toMove=White,
+                        whiteCanCastleK=False,
+                        whiteCanCastleQ=False,
+                        blackCanCastleK=False,
+                        blackCanCastleQ=False,
+                        enPassantEnabled=Nothing
+                      }
 
 initial_board :: Board
 initial_board = Board { board =
