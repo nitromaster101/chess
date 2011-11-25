@@ -7,8 +7,8 @@ import Data.List.Split (wordsBy)
 import Data.Char (ord, chr, isDigit, digitToInt, isLower, toLower, toUpper)
 import Data.Maybe (isJust, isNothing, mapMaybe, fromJust)
 
-data Color = White | Black deriving (Eq, Show, Enum)
-data Kind = King | Queen | Rook | Bishop | Knight | Pawn deriving (Eq, Show, Enum)
+data Color = White | Black deriving (Eq, Ord, Show, Enum)
+data Kind = King | Queen | Rook | Bishop | Knight | Pawn deriving (Eq, Ord, Show, Enum)
 type Piece = (Color, Kind)
 type Position = (Int8, Int8)
 -- enpassant is the pawn that will do the enpassanting
@@ -24,7 +24,7 @@ data Board = Board { board :: Array Position (Maybe Piece),
                      blackCanCastleQ :: Bool,
                      enPassantEnabled :: Maybe Position, -- the pawn that could be
                                                          -- captured via en passant
-                     toMove :: Color} deriving (Eq)
+                     toMove :: Color} deriving (Eq, Ord)
 
 -- should be the inverse of board_from_fen
 board_to_fen :: Board -> String
@@ -38,7 +38,9 @@ board_to_fen (Board { board = board,
   (intercalate "/" $ map print_row [0..7]) ++ " " ++
   (if tm == White then "w" else "b") ++ " " ++
   (if wcck then "K" else "") ++ (if wccq then "Q" else "") ++
-  (if bcck then "k" else "") ++ (if bccq then "q" else "") ++ " " ++
+  (if bcck then "k" else "") ++ (if bccq then "q" else "") ++
+  (if (not wcck) && (not wccq) && (not bcck) && (not bccq) then "-" else "") ++
+  " " ++
   (enpassant epe)
   where print_row r = go $ foldl (\(upto, blanks) x -> case x of Nothing -> (upto, blanks+1)
                                                                  Just p -> if blanks == 0 then (upto ++ piece2str p, 0)
@@ -358,6 +360,7 @@ other :: Color -> Color
 other White = Black
 other Black = White
 
+-- change whose turn it is to move
 swap_color :: Board -> Board
 swap_color b =
   Board { board = board b,
@@ -602,6 +605,40 @@ pb = Board { board = mkArray (\(r, c) -> if r == 6 then if c >= 5 then Just (Whi
                         blackCanCastleQ=False,
                         enPassantEnabled=Nothing
                       }
+
+qk :: Board -- problem board with KQ v k
+qk = Board { board = mkArray (\(r, c) -> if r == 4 then
+                                           if c == 3 then Just (White, King)
+                                           else if c == 4 then Just (White, Queen)
+                                                else Nothing
+                                         else if r == 6 && c == 3
+                                              then Just (Black, King)
+                                              else Nothing)
+                                ((0, 0), (7, 7)),
+                        toMove=White,
+                        whiteCanCastleK=False,
+                        whiteCanCastleQ=False,
+                        blackCanCastleK=False,
+                        blackCanCastleQ=False,
+                        enPassantEnabled=Nothing
+                      }
+
+m1 :: Board -- mate in one
+m1 = board_from_fen "8/8/8/8/8/1K6/7Q/k7 w - -"
+
+m2e :: Board -- mate in two. easy
+m2e = board_from_fen "7Q/8/8/8/8/2K5/8/k7 w - -"
+
+m2 :: Board -- mate in two
+m2 = board_from_fen "8/8/8/8/8/3K4/7Q/k7 w - -"
+
+m2a :: Board -- one step away from m2
+m2a = board_from_fen "8/8/8/8/8/2K5/7Q/k7 b - -"
+m2b = board_from_fen "8/8/8/8/8/2K5/7Q/1k6 w - -"
+m2c = board_from_fen "8/8/8/8/8/2K5/1Q6/1k6 b - -"
+
+m3 :: Board -- mate in three forced
+m3 = board_from_fen "8/8/8/8/8/2KQ4/8/k7 w - -"
 
 initial_board :: Board
 initial_board = Board { board =
