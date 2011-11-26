@@ -59,24 +59,42 @@ actions state = map (make_move state) $ all_legal_moves state
 choice g list = let (v, newg) = randomR (0, length list - 1) g in (list !! v, newg)
 
 -- find (k, v) with biggest v
--- m is [(k, v)]
-find_max_ m beta = R.fromList $ map (\(k, v) -> ((k, v), toRational $ exp $ beta * v)) m
+-- m is [(k, v, potential_best?)]
+-- return ((k, v), is_best?)
+find_max_ m beta =
+  do
+    random_selection <- R.fromList $ map (\(k, v, b) -> ((k, v, b), toRational $ exp $ beta * v)) m
+    let good = filter thd3 m
+        (best@(_, _, b)) = maximumBy (comparing snd3) $ filter thd3 m
+    return $ case good of [] -> (random_selection, False)
+                          _ -> (random_selection, fst3 random_selection == fst3 best && b)
 
+
+-- return ((best_action, value), is_best?)
 use_policy bigq state beta =
+  fmap fst $
   case actions state of
-    [] -> return (state, 0)
+    [] -> return ((state, 0), True)
     (as@(a:_)) -> case beta of
       Just b ->
         do
           random_values <- getRandomRs (0.01, mate) -- try everything!
-          find_max_ (map (\(a, r) -> (a, M.findWithDefault r a q)) $ zip as random_values) b
+          fmap convert $ find_max_
+            (map (\(a, r) -> case M.lookup a q of Just x -> (a, x, True)
+                                                  Nothing -> (a, r, False))
+             $ zip as random_values) b
       Nothing ->
         case catMaybes $ map (\a -> fmap (\x -> (a, x)) (M.lookup a q)) $ as of
           [] -> do
             random_values <- getRandomRs (0.01, mate) -- try everything!
-            find_max_ (map (\(a, r) -> (a, M.findWithDefault r a q)) $ zip as random_values) 1
-          many -> return $ maximumBy (comparing snd) many
+            fmap convert $ find_max_
+              (map (\(a, r) -> case M.lookup a q of Just x -> (a, x, True)
+                                                    Nothing -> (a, r, False))
+               $ zip as random_values) 1
+
+          many -> return $ (maximumBy (comparing snd) many, True)
   where q = getq bigq
+        convert ((a, b, c), d) = ((a, b), d)
 
 keys n = [(x, y) | x <- [-n..n], y <- [-n..n]]
 
@@ -102,13 +120,17 @@ q_one bigq state seen alpha gamma =
     (new_state, old_value) <- use_policy bigq state (Just 1)
     new_qa <- use_policy bigq new_state (Just 1)
     let r = if S.member state seen then 0 else reward state new_state
+--        new_value = if is_best || old_value < (snd $ new_qa) then old_value + alpha * (r + gamma * (snd $ new_qa) - old_value)
+--                    else old_value
         new_value = old_value + alpha * (r + gamma * (snd $ new_qa) - old_value)
         newq = M.insert state new_value q
     ~(states, rest) <- splitRandom $ q_one (Q newq) new_state (S.insert state seen) alpha gamma
     -- we add the new_state -> r value in q to record that we saw a good move.
     -- this only works if the reward is non-stochastic....
     -- what if we have case of a repeated position. then this isn't true at all.
-    return $ if S.member state seen || done state then ([state], [bigq, Q (M.insert new_state r q)]) else (state:states, bigq:rest)
+    return $ if S.member state seen then ([state], [bigq])
+             else if done state then ([state], [bigq, Q (M.insert state r q)])
+                  else (state:states, bigq:rest)
 
 -- todo: find out why (lookup m1) varies so much
      -- find the states that q_one goes through
@@ -141,7 +163,8 @@ main = do
   b <- eval m2
   mapM (putStrLn.show) $ zip [0..] $
     map (\(a,(fens, (_, x)))->
-          (M.lookup m2a (getq a),
+          (M.lookup m2  (getq a),
+           M.lookup m2a (getq a),
            M.lookup m2b (getq a),
            M.lookup m2c (getq a),
            x, M.size $ getq a, fens)) b
