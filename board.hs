@@ -6,6 +6,7 @@ import Data.List (intersperse, intercalate)
 import Data.List.Split (wordsBy)
 import Data.Char (ord, chr, isDigit, digitToInt, isLower, toLower, toUpper)
 import Data.Maybe (isJust, isNothing, mapMaybe, fromJust)
+import qualified Data.Set as S
 
 data Color = White | Black deriving (Eq, Ord, Show, Enum)
 data Kind = King | Queen | Rook | Bishop | Knight | Pawn deriving (Eq, Ord, Show, Enum)
@@ -25,6 +26,31 @@ data Board = Board { board :: Array Position (Maybe Piece),
                      enPassantEnabled :: Maybe Position, -- the pawn that could be
                                                          -- captured via en passant
                      toMove :: Color} deriving (Eq, Ord)
+
+data Game a = Won | Draw | Lost | Playing a -- in the eyes of white
+          deriving (Eq, Ord, Show)
+
+type FEN = String
+
+instance Monad Game where
+  (Playing b) >>= f = f b
+  Won >>= _ = Won
+  Draw >>= _ = Draw
+  Lost >>= _ = Lost
+  return = Playing
+
+start_game :: Game (Board, S.Set FEN)
+start_game = return $ (initial_board, S.empty)
+
+play :: String -> (Board, S.Set FEN) -> Game (Board, S.Set FEN)
+play move (board, fens) = let newboard = make_move board (str2move move)
+                              f = board_to_fen newboard
+                  in
+                   if S.member f fens then Draw else
+                   if in_stalemate newboard then Draw else
+                     if in_checkmate newboard
+                       then if toMove newboard == White then Lost else Won
+                     else Playing (newboard, S.insert (board_to_fen board) fens)
 
 -- should be the inverse of board_from_fen
 board_to_fen :: Board -> String

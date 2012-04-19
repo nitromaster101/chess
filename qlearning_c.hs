@@ -10,6 +10,7 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.Loops
 import Control.Monad.Random as R
+import System.Console.ANSI -- pretty colors
 
 import Board
 import Play
@@ -42,8 +43,8 @@ done = is_done
 
 -- reward state newstate -> reward once we get to newstate.
 --reward (x1, y1) (x, y) = if x >= bign then 10 else -1 --a * (x - x1) + b * (y - y1)
-reward state _ = case final_position state of Just x -> x
-                                              Nothing -> -0.125 -- -1 -- stop twiddling!
+reward state = case final_position state of Just x -> x
+                                            Nothing -> -0.125 -- -1 -- stop twiddling!
 --reward (x, y) = if true_value (x, y) >= 100 then 100 else 0
 
 neighbors = [(\(x, y) -> (x+1, y)),
@@ -72,7 +73,7 @@ find_max_ m beta =
 
 -- return ((best_action, value), is_best?)
 use_policy bigq state beta =
-  fmap fst $
+  --fmap fst $
   case actions state of
     [] -> return ((state, 0), True)
     (as@(a:_)) -> case beta of
@@ -116,19 +117,21 @@ random_q_one =
 
 q_one bigq state seen alpha gamma =
   do
+    r <- getRandomR (-1, mate)
     let q = getq bigq
-    (new_state, old_value) <- use_policy bigq state (Just 1)
-    new_qa <- use_policy bigq new_state (Just 1)
-    let r = if S.member state seen then 0 else reward state new_state
---        new_value = if is_best || old_value < (snd $ new_qa) then old_value + alpha * (r + gamma * (snd $ new_qa) - old_value)
---                    else old_value
-        new_value = old_value + alpha * (r + gamma * (snd $ new_qa) - old_value)
+        old_value = M.findWithDefault r state q
+    ((new_state, value), is_best) <- use_policy bigq state (Just 1)
+    --(new_qa, _) <- use_policy bigq new_state (Just 1)
+    let r = if S.member state seen then 0 else reward state
+        --new_value = if is_best || old_value < (snd $ new_qa) then old_value + alpha * (r + gamma * (snd $ new_qa) - old_value)
+        --            else old_value
+        new_value = old_value + alpha * (r + gamma * value - old_value)
         newq = M.insert state new_value q
     ~(states, rest) <- splitRandom $ q_one (Q newq) new_state (S.insert state seen) alpha gamma
     -- we add the new_state -> r value in q to record that we saw a good move.
     -- this only works if the reward is non-stochastic....
     -- what if we have case of a repeated position. then this isn't true at all.
-    return $ if S.member state seen then ([state], [bigq])
+    return $ if S.member state seen then ([state], [bigq, Q newq])
              else if done state then ([state], [bigq, Q (M.insert state r q)])
                   else (state:states, bigq:rest)
 
@@ -140,10 +143,15 @@ get_last i x = take i $ drop (length x - i) x
 
 -- should return list of bigqs
 q_multiple init_state initq alpha gamma =
-  unfoldrM (\q -> fmap (\x -> let y = last $ snd x
-                                  z = map (takeWhile (not . (==' ')) . board_to_fen) $ get_last 5 $ fst x
-                              in Just ((z, y), y))
-                  $ q_one q init_state S.empty alpha gamma) initq
+  unfoldrM
+  (\q ->
+    do
+      (states, qs) <- q_one q init_state S.empty alpha gamma
+      let next_q = last $ qs
+          fens = map (takeWhile (not . (==' ')) . board_to_fen) $ get_last 5 $ states
+      first_look <- use_policy (head qs) init_state Nothing
+      return $ Just ((first_look, fens, next_q), next_q))
+ initq
 
 e = evalRandIO
 
@@ -151,23 +159,37 @@ e = evalRandIO
 train init =
   do
     q <- get_random_q
+    -- using 1 instead of 0.8 made it take longer on one try.
     splitRandom $ q_multiple init q 0.1 0.8
 
 main = do
-  putStrLn "main"
+  --  putStrLn "main"
   --q <- evalRandIO $ random_q_one 1
   --putStrLn $ show $ snd $ q
   --qs <- evalRandIO $ train (0,0)
   --vals <- evalRandIO $ fmap (zip [0..]) $ mapM (playmany (0,0)) qs
   --putStrLn $ show $ take 10000 vals
   b <- eval m2
-  mapM (putStrLn.show) $ zip [0..] $
-    map (\(a,(fens, (_, x)))->
+  let convert (Just x) = take 5 $ show x
+      convert Nothing = "-"
+  mapM (\(i, (a, fl, b, c, d, e, f, g)) ->
+         do
+           putStr $ (show i) ++ " " ++ (convert a) -- ++ " " ++ (show fl)
+           putStr $ " " ++ (convert b) ++ " " ++ (convert c) ++ " " ++ (convert d) ++ " "
+           --setSGR [SetColor Foreground Vivid $ if e == Just 9.625 then Blue else Red ]
+           putStr $ (convert e)
+           --setSGR [] -- reset
+           putStrLn $ " " ++ (show f) ++ " " ++ (show g))
+
+
+    $ zip [0..] $
+    map (\(a, (first_look, fens, (_, x)))->
           (M.lookup m2  (getq a),
+           first_look,
            M.lookup m2a (getq a),
            M.lookup m2b (getq a),
            M.lookup m2c (getq a),
-           x, M.size $ getq a, fens)) b
+           x, M.size $ getq a, fens)) (take 10000 b)
 
 
 average x =
@@ -179,10 +201,10 @@ average x =
 
 eval init =
   do
-    x <- newStdGen
+    g <- newStdGen
     v <- evalRandIO $ (splitRandom $ train init) >>=
-         (sequence . map (\(len, x) -> fmap (\y -> (x, (len, y))) $ splitRandom $ play x init S.empty 100))
-    setStdGen x
+         (sequence . map (\(v, len, x) -> fmap (\y -> (x, (v, len, y))) $ splitRandom $ play x init S.empty 100))
+    setStdGen g
     return v
 
 playmany init bigq = fmap (average) $ replicateM 100 (fmap snd $ play bigq init S.empty 100)
@@ -192,8 +214,8 @@ play _ _ _ 0 = return $ ([], Nothing)
 play bigq state seen ply =
   do
     let q = getq bigq
-    next_state <- fmap fst $ use_policy bigq state Nothing
-    let r = if S.member state seen then 0 else reward state next_state
+    (next_state, _) <- fmap fst $ use_policy bigq state Nothing
+    let r = if S.member state seen then 0 else reward state
     (list, re) <- play bigq next_state (S.insert state seen) (ply-1)
     return $ if S.member state seen || done state then ([state], Just r) else (state:list, fmap (r+) re)
 
