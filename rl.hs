@@ -1,5 +1,5 @@
 import Debug.Trace
-import Data.List (maximumBy, unfoldr)
+import Data.List (maximumBy, minimumBy, unfoldr)
 import Data.Ord (comparing)
 import qualified Data.Map as M
 import qualified Control.Monad.Random as R
@@ -8,7 +8,7 @@ import qualified Control.Monad.Random as R
 -- an nxn board where one player tries to get the puck into a certain square
 -- optional: an opponent can try to hurt him.
 
-type State = (Int, Int)
+type State = Int --(Int, Int)
 data Player = White | Black
 
 n = 2
@@ -17,15 +17,30 @@ big_reward = 100
 all_states = [(x, y) | x <- [0..n], y <- [0..n]]
 
 inside (x, y) = (0 <= x) && (x <= n) && (0 <= y) && (y <= n)
-actions (x, y) = filter inside [(x+1, y), (x-1,y), (x, y+1), (x, y-1)]
+--actions (x, y) = filter inside [(x+1, y), (x-1,y), (x, y+1), (x, y-1)]
+
+actions 0 = [1, 4]
+actions 1 = [2, 3]
+actions 2 = [1, 3]
+actions 3 = []
+actions 4 = [3]
+
+reward 2 = 100
+reward 4 = 1100
+reward 3 = -1000
+reward _ = 0
+
+terminal 3 = True
+terminal _ = False
 
 -- reward (2, 1) = -100
-reward (x, y) = if (x == n) && (y == n) then big_reward else -1
-player_reward White (x, y) = if (x == n) && (y == n) then big_reward else -1 -- white loses a point until it gets the bit reward
-player_reward Black (x, y) = 1 -- black gets a point for every move that white dwadles
--- the optimum stategy is for black to get on the winning square. whenever white moves off, black gets back on. That or black always goes back to the initial state.
-terminal x = reward x == big_reward
-player_terminal p x = player_reward p x == big_reward
+--reward (x, y) = if (x == n) && (y == n) then big_reward else -1
+
+
+--player_reward (x, y) = if (x == n) && (y == n) then big_reward else -1
+
+--terminal (0, 0) = True
+--terminal x = let z = reward x in z == big_reward
 
 other White = Black
 other Black = White
@@ -63,28 +78,66 @@ choose x =
     i <- R.getRandomR (0, len-1)
     return $ x !! i
 
-competitive_training lambda epsilon values elig state player =
-  let reward_fn = player_reward player
-  in
-   do
-    next_state <- maxi values state
+-- return best and true if its the real best, or false if its a random choice.
+maxi v state epsilon =
+  do
+    x <- R.getRandomR (0.0, 1.0)
+    r <- choose (actions state) -- trace ("maxi " ++ (show v ) ++ " " ++ (show $ actions state)) (actions state))
+    if (x :: Double) < epsilon then return $ trace ("choosing " ++ show r) (r, False)
+      else return $ (maximumBy (comparing (\x -> M.findWithDefault 0 x v)) (actions state), True)
+
+mini v state epsilon =
+  do
+    x <- R.getRandomR (0.0, 1.0)
+    r <- choose (actions state) --(trace ("mini " ++ (show $ actions state)) (actions state))
+    if (x :: Double) < epsilon then return $ trace ("choosing " ++ show r) (r, False)
+      else return $ (minimumBy (comparing (\x -> M.findWithDefault 0 x v)) (actions state), True)
+
+
+afterstate_step lambda epsilon values elig state steps =
+  do
+    let func = if steps `mod` 2 == 0 then maxi else mini
+    (next_state, real_best) <- case actions state of [] -> return (-1, True)
+                                                     _ -> func values state epsilon
     let r = reward state
+        delta = r + gamma * (M.findWithDefault 0 next_state values) -
+                (M.findWithDefault 0 state values)
+        just_visited_elig = M.insertWith (+) state 1 elig
+        updated_values = if M.notMember state values then M.insert state 0 values else values
+        new_values = if real_best then
+                       M.mapWithKey (\k v -> v + alpha * delta * (M.findWithDefault 0 k just_visited_elig)) updated_values
+                     else values
+        new_elig = if real_best then M.map ((*) (gamma * lambda)) just_visited_elig else M.empty
+      in
+     if (steps > 0 && terminal state) || steps >= 50
+     then return $ trace (show (steps, state, next_state)) new_values else
+       trace (show (steps, epsilon, state, next_state, real_best, new_elig, new_values))
+       (afterstate_step lambda epsilon new_values new_elig next_state (steps+1))
+
+afterstate_episode lambda values start =
+  loop (\v -> afterstate_step lambda 0.1 v M.empty start 0) values
+  where max a b = if a > b then a else b
+
+
+game_step lambda epsilon values elig state steps =
+  do
+    (next_state, _) <- maxi values state epsilon
+    let r = (reward state) * (if steps `mod` 2 == 0 then 1 else -1)
         old_value = M.findWithDefault 0 state values
         delta = r + gamma * (M.findWithDefault 0 next_state values) - old_value
         updated_elig = M.insertWith (+) state 1 elig
         new_values = M.mapWithKey (\k v -> v + alpha * delta * (M.findWithDefault 0 k updated_elig)) values
         new_elig = M.map ((*) (gamma * lambda)) updated_elig
       in
-     if player_terminal player state then return $ trace (show (state, next_state)) new_values else
-       trace (show (epsilon, state, next_state, old_value, new_elig, new_values))
-       (competitive_training lambda epsilon new_values new_elig next_state (other player))
+     if (steps > 0 && terminal next_state) || steps >= 50
+     then return $ trace (show (steps, state, next_state)) new_values else
+       trace (show (steps, epsilon, state, next_state, old_value, new_elig, new_values))
+       (game_step lambda epsilon new_values new_elig next_state (steps+1))
 
-  where maxi v state =
-          do
-            x <- R.getRandomR (0.0, 1.0)
-            r <- choose (actions state)
-            if (x :: Double) < epsilon then return $ trace ("choosing " ++ show r) r
-              else return $ maximumBy (comparing (\x -> M.findWithDefault 0 x v)) (actions state)
+game_episode lambda values start =
+  loop (\(v, e) -> do { r <- game_step lambda e v M.empty start 0;
+                        return (r, max (e-0.01) 0.001)}) (values, 0.5)
+  where max a b = if a > b then a else b
 
 
 {-
@@ -179,20 +232,19 @@ q_episode values start = loop (\v -> q_step v start) values
 --loop :: (RandomGen m) => (a -> m a) -> a -> IO []
 loop f seed = do
   a <- R.evalRandIO $ f seed
+  trace (show a ++ "\n---------------------------") $
+    if seed == a then return [] else loop f a
 
-  --putStrLn $ show a
-  trace (show a) $ if seed == a then return [] else loop f a
-
-  --return (r : rest)
-
-initial_values :: M.Map (Int, Int) Double
-initial_values = M.fromList $ map (\x -> (x, 0)) all_states
+--initial_values :: M.Map (Int, Int) Double
+--initial_values = M.fromList $ map (\x -> (x, 0)) all_states
 
 main = do
   putStrLn "start"
 
   --sarsa_episode initial_values (0,0)
   --q_episode initial_values (0,0)
-  sarsa_lambda_episode 0.9 initial_values (0,0)
+  --sarsa_lambda_episode 0.9 initial_values (0,0)
+  --game_episode 0.9 M.empty 0
+  afterstate_episode 0.9 M.empty 0
 
   putStrLn "done"
