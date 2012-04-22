@@ -17,8 +17,12 @@ big_reward = 100
 all_states = [(x, y) | x <- [0..n], y <- [0..n]]
 
 inside (x, y) = (0 <= x) && (x <= n) && (0 <= y) && (y <= n)
---actions (x, y) = filter inside [(x+1, y), (x-1,y), (x, y+1), (x, y-1)]
+actions (x, y) = filter inside [(x+1, y), (x-1,y), (x, y+1), (x, y-1)]
 
+reward (x, y) = if y == n then big_reward else 0
+terminal x = reward x == big_reward
+nonexistent_state = (-1, -1)
+{-
 actions 0 = [1, 4]
 actions 1 = [2, 3]
 actions 2 = [1, 3]
@@ -32,7 +36,7 @@ reward _ = 0
 
 terminal 3 = True
 terminal _ = False
-
+-}
 -- reward (2, 1) = -100
 --reward (x, y) = if (x == n) && (y == n) then big_reward else -1
 
@@ -94,10 +98,11 @@ mini v state epsilon =
       else return $ (minimumBy (comparing (\x -> M.findWithDefault 0 x v)) (actions state), True)
 
 
-afterstate_step lambda epsilon values elig state steps =
+-- setting eligility to zero after a random step changes this from SARSA to Q-learning.
+lin_step lambda epsilon values elig state steps =
   do
-    let func = if steps `mod` 2 == 0 then maxi else mini
-    (next_state, real_best) <- case actions state of [] -> return (-1, True)
+    let func = maxi -- if steps `mod` 2 == 0 then maxi else mini
+    (next_state, real_best) <- case actions state of [] -> return (nonexistent_state, True)
                                                      _ -> func values state epsilon
     let r = reward state
         delta = r + gamma * (M.findWithDefault 0 next_state values) -
@@ -107,15 +112,49 @@ afterstate_step lambda epsilon values elig state steps =
         new_values = if real_best then
                        M.mapWithKey (\k v -> v + alpha * delta * (M.findWithDefault 0 k just_visited_elig)) updated_values
                      else values
-        new_elig = if real_best then M.map ((*) (gamma * lambda)) just_visited_elig else M.empty
+        new_elig = if real_best then M.map ((*) (gamma * lambda)) just_visited_elig
+                   else M.map (\_ -> 0) just_visited_elig
       in
-     if (steps > 0 && terminal state) || steps >= 50
-     then return $ trace (show (steps, state, next_state)) new_values else
-       trace (show (steps, epsilon, state, next_state, real_best, new_elig, new_values))
+     if (steps > 0 && terminal state)
+     then return $ trace (show (steps, state, next_state)) (new_values, real_best) else
+       trace (show (steps, delta, epsilon, state, next_state, real_best, new_elig, new_values))
+       (lin_step lambda epsilon new_values new_elig next_state (steps+1))
+
+
+lin_episode lambda values start =
+  loop_ (\v -> lin_step lambda 0.1 v M.empty start 0) values
+  where max a b = if a > b then a else b
+
+
+-- setting eligility to zero after a random step changes this from SARSA to Q-learning.
+afterstate_step lambda epsilon values elig state steps =
+  do
+    let func = maxi -- if steps `mod` 2 == 0 then maxi else mini
+    (next_state, real_best) <- case actions state of [] -> return (nonexistent_state, True)
+                                                     _ -> func values state epsilon
+    let r = reward state
+        delta = r + gamma * (M.findWithDefault 0 next_state values) -
+                (M.findWithDefault 0 state values)
+        just_visited_elig = M.insertWith (+) state 1 elig
+        updated_values = if M.notMember state values then M.insert state 0 values else values
+        new_values = if real_best then
+                       M.mapWithKey (\k v -> v + alpha * delta * (M.findWithDefault 0 k just_visited_elig)) updated_values
+                     else values
+        new_elig = if real_best then M.map ((*) (gamma * lambda)) just_visited_elig
+                   else M.map (\_ -> 0) just_visited_elig
+      in
+     if (steps > 0 && terminal state)
+     then return $ trace (show (steps, state, next_state)) (new_values, real_best) else
+       trace (show (steps, delta, epsilon, state, next_state, real_best, new_elig, new_values))
        (afterstate_step lambda epsilon new_values new_elig next_state (steps+1))
 
+loop_ f seed = do
+  (a, killable) <- R.evalRandIO $ f seed
+  trace (show a ++ "\n---------------------------") $
+    if killable && seed == a then return [] else loop_ f a
+
 afterstate_episode lambda values start =
-  loop (\v -> afterstate_step lambda 0.1 v M.empty start 0) values
+  loop_ (\v -> afterstate_step lambda 0.1 v M.empty start 0) values
   where max a b = if a > b then a else b
 
 
@@ -245,6 +284,7 @@ main = do
   --q_episode initial_values (0,0)
   --sarsa_lambda_episode 0.9 initial_values (0,0)
   --game_episode 0.9 M.empty 0
-  afterstate_episode 0.9 M.empty 0
+  --afterstate_episode 0.9 M.empty (0, 0)
+  lin_episode 0.9 M.empty (0, 0)
 
   putStrLn "done"
