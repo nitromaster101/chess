@@ -16,10 +16,18 @@ big_reward = 100
 
 all_states = [(x, y) | x <- [0..n], y <- [0..n]]
 
+one 0 x = 1 : (take (x-1) $ repeat 0)
+one i x = 0 : (one (i-1) (x-1))
+
 inside (x, y) = (0 <= x) && (x <= n) && (0 <= y) && (y <= n)
 actions (x, y) = filter inside [(x+1, y), (x-1,y), (x, y+1), (x, y-1)]
-
-reward (x, y) = if y == n then big_reward else 0
+features :: (Int, Int) -> [Double]
+features (x, y) = map fromIntegral (one ((n+1) * x + y) ((n+1)*(n+1))) ++ (map id [if x == y then 1 else 0, 1.0 * x' / n', 1.0 * y' / n', if y == n then 1 else 0, if x == n then 1 else 0])
+  where x' = fromIntegral x
+        y' = fromIntegral y
+        n' = fromIntegral n
+--features (x, y) = map fromIntegral [if x == y then 1 else 0, x, y, if y == n then 1 else 0, if x == n then 1 else 0]
+reward (x, y) = if y == n then big_reward else -0.05
 terminal x = reward x == big_reward
 nonexistent_state = (-1, -1)
 {-
@@ -97,32 +105,36 @@ mini v state epsilon =
     if (x :: Double) < epsilon then return $ trace ("choosing " ++ show r) (r, False)
       else return $ (minimumBy (comparing (\x -> M.findWithDefault 0 x v)) (actions state), True)
 
+lin_maxi w state epsilon =
+  do
+    x <- R.getRandomR (0.0, 1.0)
+    r <- choose (actions state) -- trace ("maxi " ++ (show v ) ++ " " ++ (show $ actions state)) (actions state))
+    if (x :: Double) < epsilon then return $ trace ("choosing " ++ show r) (r, False)
+      else return $ (maximumBy (comparing (\x -> evaluate x w)) (actions state), True)
+
+evaluate state weights = sum $ zipWith (*) (features state) weights
 
 -- setting eligility to zero after a random step changes this from SARSA to Q-learning.
-lin_step lambda epsilon values elig state steps =
+lin_step lambda epsilon weights elig state steps =
   do
-    let func = maxi -- if steps `mod` 2 == 0 then maxi else mini
+    let func = lin_maxi -- if steps `mod` 2 == 0 then maxi else mini
     (next_state, real_best) <- case actions state of [] -> return (nonexistent_state, True)
-                                                     _ -> func values state epsilon
+                                                     _ -> func weights state epsilon
     let r = reward state
-        delta = r + gamma * (M.findWithDefault 0 next_state values) -
-                (M.findWithDefault 0 state values)
-        just_visited_elig = M.insertWith (+) state 1 elig
-        updated_values = if M.notMember state values then M.insert state 0 values else values
-        new_values = if real_best then
-                       M.mapWithKey (\k v -> v + alpha * delta * (M.findWithDefault 0 k just_visited_elig)) updated_values
-                     else values
-        new_elig = if real_best then M.map ((*) (gamma * lambda)) just_visited_elig
-                   else M.map (\_ -> 0) just_visited_elig
+        delta = r + gamma * (evaluate next_state weights) -
+                (evaluate state weights)
+        new_elig = map (\(e, f) -> (gamma * lambda * e + f)) $ zip elig (features state)
+        new_weights = map (\(w, e) -> w + alpha * delta * e) $ zip weights new_elig
+
       in
      if (steps > 0 && terminal state)
-     then return $ trace (show (steps, state, next_state)) (new_values, real_best) else
-       trace (show (steps, delta, epsilon, state, next_state, real_best, new_elig, new_values))
-       (lin_step lambda epsilon new_values new_elig next_state (steps+1))
+     then return $ trace (show (steps, state, next_state)) (new_weights, real_best) else
+       trace (show (steps, delta, epsilon, state, next_state, real_best, new_elig, new_weights))
+       (lin_step lambda epsilon new_weights new_elig next_state (steps+1))
 
 
 lin_episode lambda values start =
-  loop_ (\v -> lin_step lambda 0.1 v M.empty start 0) values
+  loop_ (\v -> lin_step lambda 0.1 v [0 | x <- values] start 0) values
   where max a b = if a > b then a else b
 
 
@@ -279,12 +291,11 @@ loop f seed = do
 
 main = do
   putStrLn "start"
-
   --sarsa_episode initial_values (0,0)
   --q_episode initial_values (0,0)
   --sarsa_lambda_episode 0.9 initial_values (0,0)
   --game_episode 0.9 M.empty 0
   --afterstate_episode 0.9 M.empty (0, 0)
-  lin_episode 0.9 M.empty (0, 0)
+  lin_episode 0.9 [0 | x <- features (0, 0)] (0, 0)
 
   putStrLn "done"
